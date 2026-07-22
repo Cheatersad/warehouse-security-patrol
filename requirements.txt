@@ -1,0 +1,6 @@
+# Non-ROS Python dependencies used by the optional perception pipeline.
+# Most ROS image dependencies should be installed through apt/rosdep.
+PyYAML>=6.0
+numpy>=1.23
+opencv-python>=4.6
+ultralytics>=8.0
