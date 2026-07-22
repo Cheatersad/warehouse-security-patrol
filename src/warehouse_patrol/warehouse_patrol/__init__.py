@@ -1,0 +1,1 @@
+"""Warehouse patrol package."""
