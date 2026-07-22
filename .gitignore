@@ -1,0 +1,48 @@
+# ROS 2 / colcon outputs
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# Runtime security outputs
+security_log.txt
+security_events.jsonl
+security_events/
+patrol_reports/
+
+# ROS and Gazebo runtime files
+.ros/
+*.log
+*.bag
+*.db3
+*.mcap
+
+# Generated maps outside package source
+*.posegraph
+
+# Backups and temporary patch directories
+*backup_*/
+*_backup_*/
+*.backup
+*.before_*
+COLCON_IGNORE
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+*~
+
+# Large optional model files
+*.engine
+*.onnx
+*.pt
+
+# Keep an explicitly tracked placeholder if needed
+!docs/.gitkeep

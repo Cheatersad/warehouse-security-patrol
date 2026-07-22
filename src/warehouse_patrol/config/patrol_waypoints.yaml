@@ -1,0 +1,219 @@
+initial_pose:
+  x: -8.0
+  y: -9.5
+  yaw: 0.0
+dwell_seconds: 2.0
+max_retries: 2
+loop_patrol: true
+loop_pause_seconds: 8.0
+zones:
+- name: Zone_A_Receiving
+  restricted: false
+  waypoints:
+  - x: -8.0
+    y: -9.5
+    yaw: 1.57
+  - x: -8.0
+    y: -6.5
+    yaw: 1.57
+  - x: -8.0
+    y: -4.0
+    yaw: 3.14
+  - x: -11.2
+    y: -4.0
+    yaw: 3.14
+  - x: -14.0
+    y: -4.0
+    yaw: 1.57
+  - x: -14.0
+    y: -0.8
+    yaw: 0.0
+  - x: -8.5
+    y: -0.8
+    yaw: 0.0
+- name: Zone_B_Central_Dispatch
+  restricted: false
+  waypoints:
+  - x: -7.2
+    y: -0.8
+    yaw: -1.57
+  - x: -6.5
+    y: -4.5
+    yaw: -1.57
+  - x: -6.5
+    y: -7.0
+    yaw: -1.57
+  - x: -6.5
+    y: -9.5
+    yaw: 0.0
+  - x: -2.2
+    y: -9.5
+    yaw: 0.0
+  - x: 2.2
+    y: -9.5
+    yaw: 0.0
+  - x: 6.0
+    y: -9.5
+    yaw: 1.57
+  - x: 6.0
+    y: -4.5
+    yaw: 3.14
+  - x: 0.0
+    y: -4.5
+    yaw: 3.14
+  - x: -6.0
+    y: -4.5
+    yaw: 0.0
+- name: Zone_F_Packing
+  restricted: false
+  waypoints:
+  - x: 6.8
+    y: -9.6
+    yaw: 1.57
+  - x: 6.8
+    y: -6.8
+    yaw: 0.0
+  - x: 10.5
+    y: -6.8
+    yaw: 0.0
+  - x: 13.8
+    y: -6.8
+    yaw: 1.57
+  - x: 13.8
+    y: -3.8
+    yaw: 3.14
+  - x: 6.8
+    y: -3.8
+    yaw: 1.57
+- name: Zone_E_Restricted_Inventory
+  restricted: true
+  waypoints:
+  - x: 7.3
+    y: 1.6
+    yaw: 0.0
+  - x: 9.1
+    y: 1.6
+    yaw: 0.0
+  - x: 11.3
+    y: 1.6
+    yaw: 0.0
+  - x: 13.35
+    y: 1.6
+    yaw: 3.14
+  - x: 11.3
+    y: 1.6
+    yaw: 3.14
+  - x: 9.1
+    y: 1.6
+    yaw: 3.14
+  - x: 7.3
+    y: 1.6
+    yaw: 1.57
+- name: Zone_D_East_Storage
+  restricted: false
+  waypoints:
+  - x: 7.25
+    y: 3.7
+    yaw: 1.57
+  - x: 7.25
+    y: 5.1
+    yaw: 1.57
+  - x: 7.25
+    y: 7.2
+    yaw: 1.57
+  - x: 7.25
+    y: 9.2
+    yaw: 0.0
+  - x: 10.75
+    y: 9.2
+    yaw: -1.57
+  - x: 10.75
+    y: 7.2
+    yaw: -1.57
+  - x: 10.75
+    y: 5.1
+    yaw: 1.57
+  - x: 10.75
+    y: 7.2
+    yaw: 0.0
+  - x: 13.6
+    y: 7.2
+    yaw: 3.14
+  - x: 7.25
+    y: 7.2
+    yaw: -1.57
+  - x: 7.25
+    y: 3.7
+    yaw: 3.14
+- name: Zone_C_West_Storage
+  restricted: false
+  waypoints:
+  - x: 3.75
+    y: 3.7
+    yaw: 1.57
+  - x: 3.75
+    y: 5.1
+    yaw: 1.57
+  - x: 3.75
+    y: 7.2
+    yaw: 1.57
+  - x: 3.75
+    y: 9.2
+    yaw: 3.14
+  - x: 0.25
+    y: 9.2
+    yaw: -1.57
+  - x: 0.25
+    y: 7.2
+    yaw: -1.57
+  - x: 0.25
+    y: 5.1
+    yaw: 3.14
+  - x: -3.25
+    y: 5.1
+    yaw: 1.57
+  - x: -3.25
+    y: 7.2
+    yaw: 1.57
+  - x: -3.25
+    y: 9.2
+    yaw: 3.14
+  - x: -6.75
+    y: 9.2
+    yaw: -1.57
+  - x: -6.75
+    y: 7.2
+    yaw: -1.57
+  - x: -6.75
+    y: 5.1
+    yaw: 3.14
+  - x: -10.25
+    y: 5.1
+    yaw: 1.57
+  - x: -10.25
+    y: 7.2
+    yaw: 1.57
+  - x: -10.25
+    y: 9.2
+    yaw: 3.14
+  - x: -13.6
+    y: 9.2
+    yaw: -1.57
+  - x: -13.6
+    y: 7.2
+    yaw: 0.0
+  - x: -10.25
+    y: 7.2
+    yaw: -1.57
+  - x: -10.25
+    y: 3.7
+    yaw: 0.0
+  - x: -8.5
+    y: 3.3
+    yaw: -1.57
+  - x: -8.5
+    y: -0.8
+    yaw: -1.57
+  - x: -8.0
+    y: -9.5
+    yaw: 0.0

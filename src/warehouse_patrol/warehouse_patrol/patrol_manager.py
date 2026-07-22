@@ -1,0 +1,436 @@
+#!/usr/bin/env python3
+"""Ordered multi-zone warehouse patrol using Nav2 NavigateToPose."""
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+from typing import Any, Callable
+
+import rclpy
+from action_msgs.msg import GoalStatus
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Point
+from nav2_msgs.action import NavigateToPose
+from rclpy.action import ActionClient
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import String
+from visualization_msgs.msg import Marker, MarkerArray
+import yaml
+
+
+ZONE_COLORS = [
+    (0.20, 0.48, 0.82),
+    (0.18, 0.68, 0.45),
+    (0.74, 0.52, 0.12),
+    (0.46, 0.32, 0.78),
+    (0.90, 0.12, 0.12),
+    (0.18, 0.66, 0.70),
+]
+
+
+class PatrolManager(Node):
+    """Send all configured zone waypoints sequentially and repeat the route."""
+
+    def __init__(self) -> None:
+        super().__init__('warehouse_patrol_manager')
+
+        self.declare_parameter('waypoints_file', '')
+        self.declare_parameter('autostart', True)
+        self.declare_parameter('startup_delay_seconds', 8.0)
+        self.declare_parameter('publish_initial_pose', True)
+
+        config_path = str(self.get_parameter('waypoints_file').value)
+        if not config_path:
+            raise RuntimeError('waypoints_file parameter is required')
+        self.config_path = Path(config_path)
+        self.config = self._load_config(self.config_path)
+
+        self.initial_pose = self.config['initial_pose']
+        self.dwell_seconds = float(self.config.get('dwell_seconds', 2.0))
+        self.max_retries = int(self.config.get('max_retries', 2))
+        self.loop_patrol = bool(self.config.get('loop_patrol', True))
+        self.loop_pause_seconds = float(self.config.get('loop_pause_seconds', 8.0))
+        self.autostart = bool(self.get_parameter('autostart').value)
+        self.startup_delay = float(self.get_parameter('startup_delay_seconds').value)
+        self.should_publish_initial_pose = bool(
+            self.get_parameter('publish_initial_pose').value
+        )
+
+        self.goals: list[dict[str, Any]] = []
+        for zone_index, zone in enumerate(self.config['zones']):
+            zone_name = str(zone['name'])
+            restricted = bool(zone.get('restricted', False))
+            for waypoint_index, waypoint in enumerate(zone['waypoints']):
+                self.goals.append({
+                    'zone': zone_name,
+                    'restricted': restricted,
+                    'zone_index': zone_index,
+                    'waypoint_index': waypoint_index,
+                    'x': float(waypoint['x']),
+                    'y': float(waypoint['y']),
+                    'yaw': float(waypoint.get('yaw', 0.0)),
+                })
+
+        if not self.goals:
+            raise RuntimeError('No patrol waypoints were found')
+
+        self.current_goal_index = 0
+        self.current_retry = 0
+        self.cycle_count = 0
+        self.goal_in_progress = False
+        self.nav_server_ready = False
+        self.started = False
+        self.last_feedback_log_ns = 0
+        self.initial_pose_publish_count = 0
+        self.start_time_ns = self.get_clock().now().nanoseconds
+
+        self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self.initial_pose_pub = self.create_publisher(
+            PoseWithCovarianceStamped, '/initialpose', 10
+        )
+        self.zone_pub = self.create_publisher(String, '/patrol/current_zone', 10)
+        self.status_pub = self.create_publisher(String, '/patrol/status', 10)
+
+        marker_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.marker_pub = self.create_publisher(
+            MarkerArray, '/patrol/markers', marker_qos
+        )
+
+        self.startup_timer = self.create_timer(1.0, self._startup_tick)
+        self.marker_timer = self.create_timer(5.0, self._publish_markers)
+        self._publish_markers()
+        self._publish_status('INITIALIZING')
+
+        self.get_logger().info(
+            f'Loaded {len(self.goals)} waypoints across '
+            f'{len(self.config["zones"])} zones from {self.config_path}'
+        )
+
+    @staticmethod
+    def _load_config(path: Path) -> dict[str, Any]:
+        if not path.is_file():
+            raise FileNotFoundError(f'Patrol configuration not found: {path}')
+        data = yaml.safe_load(path.read_text())
+        if not isinstance(data, dict):
+            raise ValueError('Patrol configuration must be a YAML mapping')
+        if 'initial_pose' not in data or 'zones' not in data:
+            raise ValueError('Patrol YAML requires initial_pose and zones')
+        return data
+
+    def _startup_tick(self) -> None:
+        elapsed = (self.get_clock().now().nanoseconds - self.start_time_ns) / 1e9
+
+        # AMCL may start after this node. Repeating the initial pose makes startup
+        # deterministic without requiring a manual RViz "2D Pose Estimate" click.
+        if (
+            self.should_publish_initial_pose
+            and not self.started
+            and elapsed >= 2.0
+            and self.initial_pose_publish_count < 3
+        ):
+            self._publish_initial_pose()
+
+        if not self.nav_server_ready:
+            self.nav_server_ready = self.nav_client.wait_for_server(timeout_sec=0.05)
+            if self.nav_server_ready:
+                self.get_logger().info('Nav2 navigate_to_pose action server is ready.')
+
+        initial_pose_ready = (
+            not self.should_publish_initial_pose
+            or self.initial_pose_publish_count >= 3
+        )
+
+        if (
+            self.autostart
+            and self.nav_server_ready
+            and not self.started
+            and elapsed >= self.startup_delay
+            and initial_pose_ready
+        ):
+            self.started = True
+            self._publish_status('PATROL_STARTING')
+            self._send_current_goal()
+
+    def _publish_initial_pose(self) -> None:
+        msg = PoseWithCovarianceStamped()
+        msg.header.frame_id = 'map'
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.pose.pose.position.x = float(self.initial_pose['x'])
+        msg.pose.pose.position.y = float(self.initial_pose['y'])
+        yaw = float(self.initial_pose.get('yaw', 0.0))
+        msg.pose.pose.orientation.z = math.sin(yaw / 2.0)
+        msg.pose.pose.orientation.w = math.cos(yaw / 2.0)
+        msg.pose.covariance[0] = 0.25
+        msg.pose.covariance[7] = 0.25
+        msg.pose.covariance[35] = 0.0685
+        self.initial_pose_pub.publish(msg)
+        self.initial_pose_publish_count += 1
+        if self.initial_pose_publish_count in (1, 3, 6, 12):
+            self.get_logger().info(
+                'Published AMCL initial pose '
+                f'({self.initial_pose_publish_count}/12).'
+            )
+
+    def _send_current_goal(self) -> None:
+        if self.goal_in_progress:
+            return
+        goal_data = self.goals[self.current_goal_index]
+        self.goal_in_progress = True
+
+        zone_msg = String()
+        zone_msg.data = goal_data['zone']
+        self.zone_pub.publish(zone_msg)
+
+        pose = PoseStamped()
+        pose.header.frame_id = 'map'
+        pose.header.stamp = self.get_clock().now().to_msg()
+        pose.pose.position.x = goal_data['x']
+        pose.pose.position.y = goal_data['y']
+        pose.pose.orientation.z = math.sin(goal_data['yaw'] / 2.0)
+        pose.pose.orientation.w = math.cos(goal_data['yaw'] / 2.0)
+
+        goal = NavigateToPose.Goal()
+        goal.pose = pose
+
+        self._publish_status('NAVIGATING', goal_data)
+        self.get_logger().info(
+            f'Goal {self.current_goal_index + 1}/{len(self.goals)}: '
+            f'{goal_data["zone"]} waypoint {goal_data["waypoint_index"] + 1} '
+            f'({goal_data["x"]:.2f}, {goal_data["y"]:.2f})'
+        )
+
+        future = self.nav_client.send_goal_async(
+            goal, feedback_callback=self._feedback_callback
+        )
+        future.add_done_callback(self._goal_response_callback)
+
+    def _goal_response_callback(self, future: Any) -> None:
+        try:
+            goal_handle = future.result()
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(f'Failed to send patrol goal: {exc}')
+            self.goal_in_progress = False
+            self._handle_goal_failure('SEND_EXCEPTION')
+            return
+
+        if not goal_handle.accepted:
+            self.get_logger().warning('Nav2 rejected the patrol goal.')
+            self.goal_in_progress = False
+            self._handle_goal_failure('REJECTED')
+            return
+
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(self._result_callback)
+
+    def _feedback_callback(self, feedback_msg: Any) -> None:
+        now_ns = self.get_clock().now().nanoseconds
+        if now_ns - self.last_feedback_log_ns < 5_000_000_000:
+            return
+        self.last_feedback_log_ns = now_ns
+        feedback = feedback_msg.feedback
+        distance = getattr(feedback, 'distance_remaining', float('nan'))
+        eta = getattr(feedback, 'estimated_time_remaining', None)
+        eta_sec = None
+        if eta is not None:
+            eta_sec = float(eta.sec) + float(eta.nanosec) / 1e9
+        payload = {
+            'distance_remaining_m': round(float(distance), 2),
+            'estimated_time_remaining_s': (
+                round(eta_sec, 1) if eta_sec is not None else None
+            ),
+        }
+        self._publish_status('NAVIGATING', self.goals[self.current_goal_index], payload)
+
+    def _result_callback(self, future: Any) -> None:
+        self.goal_in_progress = False
+        try:
+            wrapped_result = future.result()
+            status = int(wrapped_result.status)
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(f'Failed to receive Nav2 result: {exc}')
+            self._handle_goal_failure('RESULT_EXCEPTION')
+            return
+
+        if status == GoalStatus.STATUS_SUCCEEDED:
+            reached = self.goals[self.current_goal_index]
+            self.current_retry = 0
+            self.get_logger().info(
+                f'Reached {reached["zone"]} waypoint '
+                f'{reached["waypoint_index"] + 1}; dwelling '
+                f'{self.dwell_seconds:.1f}s.'
+            )
+            self._publish_status('DWELLING', reached)
+            self._call_later(self.dwell_seconds, self._advance_goal)
+        else:
+            self.get_logger().warning(f'Nav2 goal ended with action status {status}.')
+            self._handle_goal_failure(f'ACTION_STATUS_{status}')
+
+    def _handle_goal_failure(self, reason: str) -> None:
+        goal_data = self.goals[self.current_goal_index]
+        if self.current_retry < self.max_retries:
+            self.current_retry += 1
+            self._publish_status(
+                'RETRYING', goal_data, {'reason': reason, 'retry': self.current_retry}
+            )
+            self.get_logger().warning(
+                f'Retrying waypoint in 3s '
+                f'({self.current_retry}/{self.max_retries}).'
+            )
+            self._call_later(3.0, self._send_current_goal)
+        else:
+            self.get_logger().error(
+                f'Skipping unreachable waypoint after {self.max_retries} retries.'
+            )
+            self.current_retry = 0
+            self._publish_status('SKIPPED', goal_data, {'reason': reason})
+            self._call_later(1.0, self._advance_goal)
+
+    def _advance_goal(self) -> None:
+        if self.current_goal_index + 1 < len(self.goals):
+            self.current_goal_index += 1
+            self._send_current_goal()
+            return
+
+        self.cycle_count += 1
+        self._publish_status('CYCLE_COMPLETE', extra={'cycle': self.cycle_count})
+        self.get_logger().info(f'Patrol cycle {self.cycle_count} complete.')
+        if self.loop_patrol:
+            self.current_goal_index = 0
+            self.get_logger().info(
+                f'Next patrol cycle starts in {self.loop_pause_seconds:.1f}s.'
+            )
+            self._call_later(self.loop_pause_seconds, self._send_current_goal)
+        else:
+            self._publish_status('PATROL_COMPLETE')
+
+    def _call_later(self, delay: float, callback: Callable[[], None]) -> None:
+        timer_holder: dict[str, Any] = {}
+
+        def wrapper() -> None:
+            timer = timer_holder.get('timer')
+            if timer is not None:
+                timer.cancel()
+                self.destroy_timer(timer)
+            callback()
+
+        timer_holder['timer'] = self.create_timer(max(0.05, delay), wrapper)
+
+    def _publish_status(
+        self,
+        state: str,
+        goal_data: dict[str, Any] | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        data: dict[str, Any] = {
+            'state': state,
+            'cycle': self.cycle_count,
+            'goal_number': self.current_goal_index + 1,
+            'total_goals': len(self.goals),
+        }
+        if goal_data:
+            data.update({
+                'zone': goal_data['zone'],
+                'restricted_zone': goal_data['restricted'],
+                'zone_waypoint': goal_data['waypoint_index'] + 1,
+                'target_x': goal_data['x'],
+                'target_y': goal_data['y'],
+            })
+        if extra:
+            data.update(extra)
+        msg = String()
+        msg.data = json.dumps(data)
+        self.status_pub.publish(msg)
+
+    def _publish_markers(self) -> None:
+        array = MarkerArray()
+        marker_id = 0
+        for zone_index, zone in enumerate(self.config['zones']):
+            color = ZONE_COLORS[zone_index % len(ZONE_COLORS)]
+            points = zone['waypoints']
+
+            path_marker = Marker()
+            path_marker.header.frame_id = 'map'
+            path_marker.header.stamp = self.get_clock().now().to_msg()
+            path_marker.ns = 'patrol_paths'
+            path_marker.id = marker_id
+            marker_id += 1
+            path_marker.type = Marker.LINE_STRIP
+            path_marker.action = Marker.ADD
+            path_marker.scale.x = 0.06
+            path_marker.color.r = color[0]
+            path_marker.color.g = color[1]
+            path_marker.color.b = color[2]
+            path_marker.color.a = 0.75
+            for waypoint in points:
+                path_marker.points.append(
+                    Point(x=float(waypoint['x']), y=float(waypoint['y']), z=0.08)
+                )
+            array.markers.append(path_marker)
+
+            point_marker = Marker()
+            point_marker.header = path_marker.header
+            point_marker.ns = 'patrol_waypoints'
+            point_marker.id = marker_id
+            marker_id += 1
+            point_marker.type = Marker.SPHERE_LIST
+            point_marker.action = Marker.ADD
+            point_marker.scale.x = 0.18
+            point_marker.scale.y = 0.18
+            point_marker.scale.z = 0.18
+            point_marker.color.r = color[0]
+            point_marker.color.g = color[1]
+            point_marker.color.b = color[2]
+            point_marker.color.a = 0.95
+            point_marker.points = list(path_marker.points)
+            array.markers.append(point_marker)
+
+            label = Marker()
+            label.header = path_marker.header
+            label.ns = 'patrol_zone_labels'
+            label.id = marker_id
+            marker_id += 1
+            label.type = Marker.TEXT_VIEW_FACING
+            label.action = Marker.ADD
+            label.pose.position.x = sum(float(p['x']) for p in points) / len(points)
+            label.pose.position.y = sum(float(p['y']) for p in points) / len(points)
+            label.pose.position.z = 0.8
+            label.pose.orientation.w = 1.0
+            label.scale.z = 0.42
+            label.color.r = color[0]
+            label.color.g = color[1]
+            label.color.b = color[2]
+            label.color.a = 1.0
+            label.text = str(zone['name']).replace('_', ' ')
+            array.markers.append(label)
+
+        self.marker_pub.publish(array)
+
+
+def main(args: list[str] | None = None) -> None:
+    rclpy.init(args=args)
+    node: PatrolManager | None = None
+    try:
+        node = PatrolManager()
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        if node is not None:
+            node.get_logger().fatal(str(exc))
+        else:
+            print(f'PatrolManager startup failed: {exc}')
+        raise
+    finally:
+        if node is not None:
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
